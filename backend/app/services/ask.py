@@ -1,8 +1,11 @@
+import logging
+
 from fastapi import HTTPException, status
 
 from ..config import get_settings
 from ..schemas.ask import AskRequest, AskResponse
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -31,9 +34,10 @@ def handle_ask(request: AskRequest, session_id: str) -> AskResponse:
             else 0.0
         )
     except Exception as e:
+        logger.exception("RAG invoke failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"RAG service unavailable: {type(e).__name__}",
+            detail=f"RAG service unavailable: {type(e).__name__}: {e!s}",
         )
 
     return AskResponse(

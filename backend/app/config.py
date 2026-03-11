@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     # RAG / AI
     RAG_ENABLED: bool = True
+    HF_TOKEN: str = ""
 
     class Config:
         env_file = ".env"

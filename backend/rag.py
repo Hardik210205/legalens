@@ -37,8 +37,8 @@ import math
 # =====================================
 # CONFIG
 # =====================================
-DATA_DIR = "data"
-INDEX_DIR = "index_data"
+DATA_DIR = "storage/index_data/training_json"
+INDEX_DIR = "storage/index_data"
 CHUNK_DIR = f"{INDEX_DIR}/chunks"
 
 EMB_MODEL = "all-MiniLM-L6-v2"
@@ -53,6 +53,7 @@ TOP_BM25 = 20
 TOP_DENSE = 20
 FINAL_TOPK = 5
 
+os.makedirs(Path(DATA_DIR), exist_ok=True)
 os.makedirs(CHUNK_DIR, exist_ok=True)
 
 # =====================================
@@ -124,7 +125,26 @@ def index_documents():
         if not f.is_file():
             continue
 
-        text = f.read_text(errors="ignore")
+        raw = f.read_text(errors="ignore")
+        if f.suffix.lower() == ".json":
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    text = data.get("text", data.get("content", data.get("body", raw)))
+                elif isinstance(data, list):
+                    parts = []
+                    for x in data:
+                        if isinstance(x, dict):
+                            parts.append(x.get("text", x.get("content", x.get("body", str(x)))))
+                        else:
+                            parts.append(str(x))
+                    text = " ".join(parts)
+                else:
+                    text = raw
+            except json.JSONDecodeError:
+                text = raw
+        else:
+            text = raw
 
         for chunk in chunk_text(text):
             if not chunk:
@@ -143,9 +163,13 @@ def index_documents():
             vectors.append(chunk)
             cid += 1
 
-    embeddings = embedder.encode(vectors, convert_to_numpy=True)
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(embeddings.astype(np.float32))
+    dim = embedder.get_sentence_embedding_dimension()
+    if vectors:
+        embeddings = embedder.encode(vectors, convert_to_numpy=True)
+        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index.add(embeddings.astype(np.float32))
+    else:
+        index = faiss.IndexFlatL2(dim)
 
     faiss.write_index(index, f"{INDEX_DIR}/faiss.index")
     json.dump(corpus, open(f"{INDEX_DIR}/bm25.json", "w"))
@@ -165,6 +189,11 @@ def hybrid_retrieve(query):
     corpus = json.load(open(f"{INDEX_DIR}/bm25.json"))
     meta = json.load(open(f"{INDEX_DIR}/meta.json"))
 
+    if not corpus or index.ntotal == 0:
+        _last_sources.set([])
+        _last_confidence.set(0.0)
+        return ""
+
     bm25 = BM25Okapi([c.split() for c in corpus])
     bm25_ids = np.argsort(
         bm25.get_scores(query.split())
@@ -173,12 +202,20 @@ def hybrid_retrieve(query):
     q_emb = embedder.encode([query], convert_to_numpy=True)
     _, dense_ids = index.search(q_emb.astype(np.float32), TOP_DENSE)
 
-    candidates = list(set(bm25_ids.tolist() + dense_ids[0].tolist()))
+    candidates = [c for c in set(bm25_ids.tolist() + dense_ids[0].tolist()) if 0 <= c < len(meta)]
+
+    def _read_chunk(path_str: str) -> str:
+        p = Path(path_str)
+        if not p.exists():
+            p = Path(INDEX_DIR) / path_str
+        if not p.exists():
+            p = Path(CHUNK_DIR) / Path(path_str).name
+        return p.read_text(errors="ignore")
 
     texts, ids = [], []
     for cid in candidates:
         path = meta[cid]["path"]
-        texts.append(Path(path).read_text(errors="ignore"))
+        texts.append(_read_chunk(path))
         ids.append(cid)
 
     scores = reranker.predict([[query, t[:512]] for t in texts])
@@ -194,7 +231,7 @@ def hybrid_retrieve(query):
     conf_scores = []
     for cid, _ in ranked:
         m = meta[cid]
-        content = Path(m["path"]).read_text(errors="ignore")
+        content = _read_chunk(m["path"])
         docs.append(content)
         sources.append(m.get("doc") or Path(m["path"]).name)
 
